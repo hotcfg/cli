@@ -284,9 +284,16 @@ func runGet(ctx context.Context, a *App, args []string) error {
 	}
 	b, _, err := a.client(t).do(ctx, http.MethodGet, binPath(pos[0], ""), q, nil)
 	var ae *apiError
-	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && t.Key == "" && !strings.Contains(pos[0], "/") {
-		// Without a key there is no organization to look a bare id up in.
-		return fmt.Errorf("%w\nhint: without an API key, name the bin with its organization: hotcfg get <org-slug>/%s", err, pos[0])
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound && t.Key == "" {
+		if !strings.Contains(pos[0], "/") {
+			// Without a key there is no organization to look a bare id up in.
+			return fmt.Errorf("%w\nhint: without an API key, name the bin with its organization: hotcfg get <org-slug>/%s", err, pos[0])
+		}
+		if ae.Message == "bin not found" {
+			// The API answers a private bin read without a key like a
+			// missing bin, so it cannot be told apart from a typo.
+			return fmt.Errorf("%w\nhint: if the bin is private, it needs an API key: --key, $HOTCFG_API_KEY or 'hotcfg login'", err)
+		}
 	}
 	if err != nil {
 		return err
