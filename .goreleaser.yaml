@@ -1,0 +1,74 @@
+# Release build. Tag a version (git tag v0.1.0 && git push origin v0.1.0) and
+# .github/workflows/release.yml runs GoReleaser: it builds the binaries,
+# creates the GitHub release with checksums, and updates the Homebrew cask in
+# github.com/hotcfg/homebrew-tap.
+#
+# Try it locally without publishing: goreleaser release --snapshot --clean
+version: 2
+
+project_name: hotcfg
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hotcfg
+    main: ./cmd/hotcfg
+    binary: hotcfg
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: hotcfg
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: hotcfg
+    name: cli
+
+homebrew_casks:
+  - name: hotcfg
+    binaries: [hotcfg]
+    homepage: https://hotcfg.run
+    description: Push, diff, promote and roll back hotcfg.run JSON configuration
+    license: Apache-2.0
+    repository:
+      owner: hotcfg
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: hotcfg-release
+      email: support@hotcfg.run
+    # The binaries are not signed or notarized, so macOS quarantines the
+    # download; clear the flag on our own binary only.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/hotcfg"]
+          end
