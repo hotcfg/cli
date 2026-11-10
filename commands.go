@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +93,9 @@ func runLogin(ctx context.Context, a *App, args []string) error {
 	if k := me.APIKey; k.Bins != nil || k.Environments != nil {
 		p.field("bins", cmp.Or(strings.Join(k.Bins, ", "), "all"))
 		p.field("envs", cmp.Or(strings.Join(k.Environments, ", "), "all"))
+		if k.Environments != nil && !slices.Contains(k.Environments, "production") {
+			p.field("prod", "no: this key can't publish, promote to or roll back production")
+		}
 	}
 	if k := me.APIKey; k.ExpiresAt != nil {
 		p.field("expires", k.ExpiresAt.Local().Format("2006-01-02 15:04"))

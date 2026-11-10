@@ -111,6 +111,7 @@ func init() {
 		{"bins create", "<bin_id>", "Create a bin", runBinsCreate},
 		{"env delete", "<bin_id>", "Delete an environment of a bin with its whole history", runEnvDelete},
 		{"usage", "", "Show your organization's plan, usage and limits", runUsage},
+		{"export", "", "Download every bin and its history as one JSON file", runExport},
 	}
 }
 
@@ -232,12 +233,16 @@ func (a *App) newFlagSet(c string) (*flag.FlagSet, *commonFlags) {
 	return fs, common
 }
 
-// printDefaults lists flags GNU-style ("--name value"), sorted.
+// printDefaults lists flags GNU-style ("--name value", "-o value" for a
+// one-letter flag), sorted by name.
 func printDefaults(w io.Writer, fs *flag.FlagSet) {
 	var lines [][2]string
 	fs.VisitAll(func(f *flag.Flag) {
 		name, usage := flag.UnquoteUsage(f)
 		left := "--" + f.Name
+		if len(f.Name) == 1 {
+			left = "-" + f.Name
+		}
 		if name != "" {
 			left += " " + name
 		}
@@ -246,7 +251,8 @@ func printDefaults(w io.Writer, fs *flag.FlagSet) {
 		}
 		lines = append(lines, [2]string{left, usage})
 	})
-	sort.Slice(lines, func(i, j int) bool { return lines[i][0] < lines[j][0] })
+	key := func(s string) string { return strings.TrimLeft(s, "-") }
+	sort.Slice(lines, func(i, j int) bool { return key(lines[i][0]) < key(lines[j][0]) })
 	for _, l := range lines {
 		fmt.Fprintf(w, "  %-22s %s\n", l[0], l[1])
 	}
@@ -259,8 +265,7 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	for {
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
-				fs.Usage()
-				return nil, err
+				return nil, err // fs.Parse has already printed fs.Usage
 			}
 			return nil, &usageError{err.Error()}
 		}

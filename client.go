@@ -67,6 +67,14 @@ func (e *apiError) Error() string {
 	switch {
 	case e.Code == "key_expired":
 		s += "\nhint: create a new key in the dashboard, then run 'hotcfg login'"
+	case e.Code == "private_bins_require_pro":
+		s += "\nhint: on the Free plan bins are public: add --public (anyone with the bin's URL can read it), or upgrade the organization to Pro"
+	case e.Code == "key_scope_denied" && strings.Contains(e.Message, "production"):
+		s += "\nhint: this key is limited to other environments, so it can't change production; an administrator can give you a key that includes production"
+	case e.Code == "key_creator_not_admin":
+		s += "\nhint: whoever created this key is no longer an administrator; ask an administrator for a new key"
+	case e.Code == "production_admin_only":
+		s += "\nhint: only administrators change production; push to staging, and ask an administrator to promote it"
 	case e.Code == "key_scope_denied":
 		s += "\nhint: this key is limited to some bins or environments; 'hotcfg login' shows which"
 	case e.Status == http.StatusUnauthorized:
@@ -80,6 +88,41 @@ func (e *apiError) Error() string {
 // do sends a request to path (relative to /v1) and returns the body of a
 // 2xx response, or an *apiError.
 func (c *client) do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, http.Header, error) {
+	resp, err := c.send(ctx, method, path, query, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read response from %s: %w", c.t.APIURL, err)
+	}
+	if len(b) > maxResponseBytes {
+		return nil, nil, fmt.Errorf("response from %s is larger than %d bytes", c.t.APIURL, maxResponseBytes)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return b, resp.Header, nil
+	}
+	return nil, resp.Header, parseAPIError(resp.StatusCode, b)
+}
+
+// stream sends a GET and returns the open body of a 2xx response, which
+// the caller closes, for responses too large to hold in memory (export).
+func (c *client) stream(ctx context.Context, path string, query url.Values) (io.ReadCloser, error) {
+	resp, err := c.send(ctx, http.MethodGet, path, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return resp.Body, nil
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	return nil, parseAPIError(resp.StatusCode, b)
+}
+
+// send builds and sends one API request.
+func (c *client) send(ctx context.Context, method, path string, query url.Values, body []byte) (*http.Response, error) {
 	u := c.t.APIURL + "/v1" + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -90,7 +133,7 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, rb)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", c.ua)
 	req.Header.Set("Accept", "application/json")
@@ -106,20 +149,14 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return nil, nil, fmt.Errorf("cannot reach %s: %w", c.t.APIURL, err)
+		return nil, fmt.Errorf("cannot reach %s: %w", c.t.APIURL, err)
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return nil, nil, fmt.Errorf("read response from %s: %w", c.t.APIURL, err)
-	}
-	if len(b) > maxResponseBytes {
-		return nil, nil, fmt.Errorf("response from %s is larger than %d bytes", c.t.APIURL, maxResponseBytes)
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return b, resp.Header, nil
-	}
-	ae := &apiError{Status: resp.StatusCode}
+	return resp, nil
+}
+
+// parseAPIError turns a non-2xx response body into an *apiError.
+func parseAPIError(status int, b []byte) *apiError {
+	ae := &apiError{Status: status}
 	var eb struct {
 		Error struct {
 			Code    string          `json:"code"`
@@ -132,7 +169,7 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	} else if s := strings.TrimSpace(string(b)); s != "" && len(s) < 300 {
 		ae.Message = s // not our API (proxy error page, wrong --api-url, ...)
 	}
-	return nil, resp.Header, ae
+	return ae
 }
 
 // doJSON is do with a JSON request body and a decoded JSON response.

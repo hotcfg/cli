@@ -119,7 +119,7 @@ func runBinsCreate(ctx context.Context, a *App, args []string) error {
 	name := fs.String("name", "", "display name (default: the id)")
 	desc := fs.String("description", "", "description")
 	schemaFile := fs.String("schema", "", "JSON Schema file every version must match")
-	public := fs.Bool("public", false, "let anyone read it without a key")
+	public := fs.Bool("public", false, "let anyone read it without a key (required on Free: private bins need Pro)")
 	pos, err := exactArgs(fs, args, "<bin_id>")
 	if err != nil {
 		return err
@@ -347,20 +347,11 @@ func runUsage(ctx context.Context, a *App, args []string) error {
 	if err != nil {
 		return err
 	}
-	var me struct {
-		Organization struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-			Slug string `json:"slug"`
-		} `json:"organization"`
-	}
-	if err := c.doJSON(ctx, http.MethodGet, "/auth/me", nil, &me); err != nil {
+	me, err := keyOrganization(ctx, c)
+	if err != nil {
 		return err
 	}
-	if me.Organization.ID == "" {
-		return errors.New("this key does not belong to an organization")
-	}
-	b, _, err := c.do(ctx, http.MethodGet, "/organizations/"+url.PathEscape(me.Organization.ID)+"/usage", nil, nil)
+	b, _, err := c.do(ctx, http.MethodGet, "/organizations/"+url.PathEscape(me.ID)+"/usage", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -380,20 +371,65 @@ func runUsage(ctx context.Context, a *App, args []string) error {
 			MaxPayloadBytes  int64 `json:"max_payload_bytes"`
 			RetainedVersions int64 `json:"retained_versions"`
 			MaxStorageBytes  int64 `json:"max_storage_bytes"`
+			// Plan features; absent from older servers.
+			PrivateBins *bool `json:"private_bins"`
+			ScopedKeys  *bool `json:"scoped_keys"`
+			AuditLog    *bool `json:"audit_log"`
 		} `json:"limits"`
 	}
 	if err := json.Unmarshal(b, &res); err != nil {
 		return fmt.Errorf("unexpected response: %w", err)
 	}
 	l := res.Limits
-	fmt.Fprintf(a.Stdout, "%s (%s), %s plan\n\n", me.Organization.Name, cmp.Or(me.Organization.Slug, me.Organization.ID), res.Plan)
+	fmt.Fprintf(a.Stdout, "%s (%s), %s plan\n\n", me.Name, cmp.Or(me.Slug, me.ID), res.Plan)
 	w := a.table()
 	fmt.Fprintf(w, "bins\t%d of %s\n", res.Usage.Bins, limitText(l.MaxBins, strconv.FormatInt))
 	fmt.Fprintf(w, "seats\t%d of %s\n", res.Usage.Seats, limitText(l.MaxSeats, strconv.FormatInt))
 	fmt.Fprintf(w, "storage\t%s of %s\n", humanBytes(res.Usage.Storage), limitText(l.MaxStorageBytes, bytesText))
 	fmt.Fprintf(w, "payload\tup to %s per version\n", limitText(l.MaxPayloadBytes, bytesText))
 	fmt.Fprintf(w, "history\t%s versions kept per environment\n", limitText(l.RetainedVersions, strconv.FormatInt))
+	for _, f := range []struct {
+		name string
+		on   *bool
+	}{
+		{"private bins", l.PrivateBins},
+		{"limited keys", l.ScopedKeys},
+		{"audit log", l.AuditLog},
+	} {
+		if f.on == nil {
+			continue
+		}
+		fmt.Fprintf(w, "%s\t%s\n", f.name, featureText(*f.on))
+	}
 	return w.Flush()
+}
+
+func featureText(on bool) string {
+	if on {
+		return "included"
+	}
+	return "not included (Pro)"
+}
+
+// orgRef is the organization a key belongs to.
+type orgRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+// keyOrganization returns the organization of the client's key.
+func keyOrganization(ctx context.Context, c *client) (orgRef, error) {
+	var me struct {
+		Organization orgRef `json:"organization"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/auth/me", nil, &me); err != nil {
+		return orgRef{}, err
+	}
+	if me.Organization.ID == "" {
+		return orgRef{}, errors.New("this key does not belong to an organization")
+	}
+	return me.Organization, nil
 }
 
 // limitText formats a limit, where -1 means unlimited.

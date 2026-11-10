@@ -41,6 +41,7 @@ hotcfg rollback mobile-flags --env production --to 3
 | `bins list` / `bins create` | List or create your organization's bins |
 | `env delete` | Delete an environment of a bin with its whole history |
 | `usage` | Show your organization's plan, usage and limits |
+| `export` | Download every bin and its history as one JSON file |
 
 Run `hotcfg help` or `hotcfg <command> --help` for flags.
 
