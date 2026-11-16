@@ -1,9 +1,6 @@
 <p align="center">
   <a href="https://hotcfg.run">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset=".github/hotcfg-logo-dark.svg">
-      <img src=".github/hotcfg-logo-light.svg" alt="hotcfg.run" width="280">
-    </picture>
+    <img src=".github/hotcfg-logo-card.svg" alt="hotcfg.run" width="300">
   </a>
 </p>
 
