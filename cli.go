@@ -117,6 +117,7 @@ func init() {
 		{"env delete", "<bin_id>", "Delete an environment of a bin with its whole history", runEnvDelete},
 		{"usage", "", "Show your organization's plan, usage and limits", runUsage},
 		{"export", "", "Download every bin and its history as one JSON file", runExport},
+		{"types", "", "Generate typed code for a bin's config from its JSON Schema", runTypes},
 	}
 }
 

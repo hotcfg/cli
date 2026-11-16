@@ -44,6 +44,7 @@ messages).
 ```sh
 hotcfg login                                   # saves a secret key
 hotcfg validate flags.json --bin mobile-flags  # check against the bin's schema, change nothing
+hotcfg types --bin mobile-flags --lang swift -o MobileFlags.swift  # types from the schema
 hotcfg push flags.json --bin mobile-flags --env staging
 hotcfg get mobile-flags --env staging --query '.features'
 hotcfg get acme/mobile-flags                   # without a key: name the organization
@@ -67,6 +68,7 @@ hotcfg rollback mobile-flags --env production --to 3
 | `env delete` | Delete an environment of a bin with its whole history |
 | `usage` | Show your organization's plan, usage and limits |
 | `export` | Download every bin and its history as one JSON file |
+| `types` | Generate typed code (TypeScript, Swift, Kotlin, Java, Python, PHP, Ruby, Go, GDScript) for a bin's config from its JSON Schema |
 
 Run `hotcfg help` or `hotcfg <command> --help` for flags.
 
