@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -141,6 +140,7 @@ func runPush(ctx context.Context, a *App, args []string) error {
 	fs, common := a.newFlagSet("push")
 	binID := fs.String("bin", "", "bin to write to: an id, or org-slug/id (required)")
 	envFlag := fs.String("env", "production", "environment: production, staging or development")
+	asJSON := fs.Bool("json", false, "print the API's JSON response")
 	pos, err := exactArgs(fs, args, "<file.json>")
 	if err != nil {
 		return err
@@ -152,16 +152,9 @@ func runPush(ctx context.Context, a *App, args []string) error {
 	if err != nil {
 		return err
 	}
-	file := pos[0]
-	var payload []byte
-	if file == "-" {
-		file = "<stdin>"
-		payload, err = io.ReadAll(a.Stdin)
-	} else {
-		payload, err = os.ReadFile(file)
-	}
+	file, payload, err := a.readPayload(pos[0])
 	if err != nil {
-		return fmt.Errorf("read %s: %w", file, err)
+		return err
 	}
 	if err := checkJSON(file, payload); err != nil {
 		return err
@@ -182,6 +175,9 @@ func runPush(ctx context.Context, a *App, args []string) error {
 			return errReported
 		}
 		return err
+	}
+	if *asJSON {
+		return a.writeJSONOut(b)
 	}
 	var res writeResult
 	if err := json.Unmarshal(b, &res); err != nil {
@@ -210,9 +206,24 @@ func checkJSON(file string, b []byte) error {
 	if errors.As(err, &se) {
 		// Offset counts the bytes read, including the offending one.
 		line, col := lineCol(b, int(se.Offset)-1)
-		return fmt.Errorf("%s:%d:%d: invalid JSON: %s", file, line, col, se.Error())
+		return &jsonSyntaxError{file: file, line: line, col: col, msg: se.Error()}
 	}
-	return fmt.Errorf("%s: invalid JSON: %w", file, err)
+	return &jsonSyntaxError{file: file, msg: err.Error()}
+}
+
+// jsonSyntaxError is a local file that is not valid JSON. line and col are
+// 0 when the position is unknown.
+type jsonSyntaxError struct {
+	file      string
+	line, col int
+	msg       string
+}
+
+func (e *jsonSyntaxError) Error() string {
+	if e.line == 0 {
+		return fmt.Sprintf("%s: invalid JSON: %s", oneLine(e.file), e.msg)
+	}
+	return fmt.Sprintf("%s:%d:%d: invalid JSON: %s", oneLine(e.file), e.line, e.col, e.msg)
 }
 
 // schemaError is one entry of a 422 schema_validation_failed response.
@@ -227,32 +238,49 @@ type schemaError struct {
 func (a *App) printSchemaErrors(file, binID string, payload []byte, ae *apiError) {
 	var errs []schemaError
 	_ = json.Unmarshal(ae.Details, &errs)
+	a.printSchemaErrorList(file, binID, payload, errs, ae.Message)
+}
+
+// printSchemaErrorList prints schema failures (from the API or from
+// validate), each with the line of the offending value when payload is the
+// file's content, and annotates them on GitHub. summary is shown when the
+// list is empty.
+func (a *App) printSchemaErrorList(file, binID string, payload []byte, errs []schemaError, summary string) {
 	w := a.Stderr
 	n := len(errs)
 	plural := "s"
 	if n == 1 {
 		plural = ""
 	}
-	fmt.Fprintf(w, "error: %s does not match the schema of bin %s (%d error%s)\n", file, binID, n, plural)
+	fmt.Fprintf(w, "error: %s does not match the schema of bin %s (%d error%s)\n", oneLine(file), oneLine(binID), n, plural)
+	// Annotate on the file only when it is one: not stdin, not a promote's
+	// source environment (no payload).
+	annotFile := ""
+	if payload != nil && file != "<stdin>" {
+		annotFile = file
+	}
 	if n == 0 {
-		fmt.Fprintf(w, "  %s\n", ae.Message)
+		fmt.Fprintf(w, "  %s\n", oneLine(summary))
+		a.annotate(annotation{file: annotFile, message: fmt.Sprintf("does not match the schema of bin %s: %s", binID, summary)})
 		return
 	}
 	lines := pointerLines(payload)
 	for _, e := range errs {
-		loc := file
-		if line, ok := lines[e.InstanceLocation]; ok {
+		loc := oneLine(file)
+		line, ok := lines[e.InstanceLocation]
+		if ok {
 			loc += ":" + strconv.Itoa(line)
 		}
 		ptr := e.InstanceLocation
 		if ptr == "" {
 			ptr = "(document root)"
 		}
-		fmt.Fprintf(w, "\n  %s  %s\n", loc, ptr)
+		fmt.Fprintf(w, "\n  %s  %s\n", loc, oneLine(ptr))
 		if e.KeywordLocation != "" {
-			fmt.Fprintf(w, "    rule:    %s\n", e.KeywordLocation)
+			fmt.Fprintf(w, "    rule:    %s\n", oneLine(e.KeywordLocation))
 		}
-		fmt.Fprintf(w, "    message: %s\n", e.Message)
+		fmt.Fprintf(w, "    message: %s\n", oneLine(e.Message))
+		a.annotate(annotation{file: annotFile, line: line, message: ptr + " " + e.Message})
 	}
 }
 
@@ -446,6 +474,7 @@ func runRollback(ctx context.Context, a *App, args []string) error {
 	fs, common := a.newFlagSet("rollback")
 	envFlag := fs.String("env", "production", "environment: production, staging or development")
 	to := fs.String("to", "", "version to restore, e.g. 3 or v3 (required)")
+	asJSON := fs.Bool("json", false, "print the API's JSON response")
 	pos, err := exactArgs(fs, args, "<bin_id>")
 	if err != nil {
 		return err
@@ -469,10 +498,17 @@ func runRollback(ctx context.Context, a *App, args []string) error {
 	if err := t.requireKey(); err != nil {
 		return err
 	}
-	var res writeResult
-	req := map[string]any{"env": env, "version": version}
-	if err := a.client(t).doJSON(ctx, http.MethodPost, binPath(pos[0], "/rollback"), req, &res); err != nil {
+	body, _ := json.Marshal(map[string]any{"env": env, "version": version})
+	b, _, err := a.client(t).do(ctx, http.MethodPost, binPath(pos[0], "/rollback"), nil, body)
+	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return a.writeJSONOut(b)
+	}
+	var res writeResult
+	if err := json.Unmarshal(b, &res); err != nil {
+		return fmt.Errorf("unexpected response: %w", err)
 	}
 	p := a.printer()
 	p.ok("Rolled back %s (%s) to v%d", res.BinID, res.Environment, version)
@@ -488,6 +524,7 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	fs, common := a.newFlagSet("promote")
 	fromFlag := fs.String("from", "", "source environment, e.g. staging (required)")
 	toFlag := fs.String("to", "", "target environment, e.g. production (required)")
+	asJSON := fs.Bool("json", false, "print the API's JSON response")
 	pos, err := exactArgs(fs, args, "<bin_id>")
 	if err != nil {
 		return err
@@ -513,15 +550,22 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	if err := t.requireKey(); err != nil {
 		return err
 	}
-	var res writeResult
-	req := map[string]string{"from_env": from, "to_env": to}
-	if err := a.client(t).doJSON(ctx, http.MethodPost, binPath(pos[0], "/promote"), req, &res); err != nil {
+	body, _ := json.Marshal(map[string]string{"from_env": from, "to_env": to})
+	b, _, err := a.client(t).do(ctx, http.MethodPost, binPath(pos[0], "/promote"), nil, body)
+	if err != nil {
 		var ae *apiError
 		if errors.As(err, &ae) && ae.Code == "schema_validation_failed" {
 			a.printSchemaErrors(from+" payload", pos[0], nil, ae)
 			return errReported
 		}
 		return err
+	}
+	if *asJSON {
+		return a.writeJSONOut(b)
+	}
+	var res writeResult
+	if err := json.Unmarshal(b, &res); err != nil {
+		return fmt.Errorf("unexpected response: %w", err)
 	}
 	p := a.printer()
 	p.ok("Promoted %s %s v%d → %s v%d", res.BinID, from, res.PromotedFromVersion, res.Environment, res.Version)

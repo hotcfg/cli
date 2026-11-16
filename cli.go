@@ -1,7 +1,8 @@
 // Package cli implements the hotcfg command-line tool.
 //
-// It uses only the standard library: commands are flag.FlagSets, and flags
-// may appear before or after positional arguments
+// Besides the standard library it uses a JSON Schema validator, for
+// "hotcfg validate --bin". Commands are flag.FlagSets, and
+// flags may appear before or after positional arguments
 // ("hotcfg push config.json --bin app-flags").
 package cli
 
@@ -52,6 +53,9 @@ type App struct {
 	// ReadSecret reads a line without echoing it. Nil: read a plain line
 	// from Stdin (used when Stdin is not a terminal, and in tests).
 	ReadSecret func() (string, error)
+
+	// noAnnotations is set by --no-annotations (see annotate.go).
+	noAnnotations bool
 }
 
 // NewApp returns an App wired to the process's terminal and environment.
@@ -101,6 +105,7 @@ func init() {
 	commands = []command{
 		{"login", "", "Validate a secret API key and save it locally", runLogin},
 		{"push", "<file.json>", "Upload a JSON file as the next version of a bin", runPush},
+		{"validate", "<file.json>", "Check a JSON file, and with --bin against the bin's schema, without pushing", runValidate},
 		{"get", "<bin_id>", "Print a bin's payload", runGet},
 		{"diff", "<bin_id>", "Show a colored diff between two versions", runDiff},
 		{"rollback", "<bin_id>", "Make an earlier version current again", runRollback},
@@ -170,11 +175,13 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	case errors.As(err, &ue):
 		fmt.Fprintf(a.Stderr, "hotcfg %s: %s\n", c.name, ue.msg)
 		fmt.Fprintf(a.Stderr, "Run 'hotcfg %s --help' for usage.\n", c.name)
+		a.annotate(annotation{message: fmt.Sprintf("hotcfg %s: %s", c.name, ue.msg)})
 		return ExitUsage
 	case errors.Is(err, errReported):
-		return ExitError
+		return ExitError // already printed and annotated
 	default:
 		fmt.Fprintf(a.Stderr, "error: %s\n", err)
+		a.annotateError(err)
 		return ExitError
 	}
 }
@@ -189,6 +196,8 @@ Every command accepts:
   --key string      API key (default: $HOTCFG_API_KEY, then the saved credentials)
   --api-url string  API base URL (default: $HOTCFG_API_URL, then the saved
                     credentials, then %s)
+  --no-annotations  On GitHub Actions (GITHUB_ACTIONS=true), don't also print
+                    errors as ::error annotations
 
 Run 'hotcfg <command> --help' for a command's flags.
 `, DefaultAPIURL)
@@ -222,6 +231,7 @@ func (a *App) newFlagSet(c string) (*flag.FlagSet, *commonFlags) {
 	common := &commonFlags{}
 	fs.StringVar(&common.key, "key", "", "API key (overrides $HOTCFG_API_KEY and saved credentials)")
 	fs.StringVar(&common.apiURL, "api-url", "", "API base URL, e.g. http://localhost:8080")
+	fs.BoolVar(&a.noAnnotations, "no-annotations", false, "on GitHub Actions, don't also print errors as ::error annotations")
 	fs.Usage = func() {
 		fmt.Fprintf(a.Stdout, "Usage: hotcfg %s", c)
 		if cmd.args != "" {
