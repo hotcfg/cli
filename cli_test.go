@@ -26,6 +26,10 @@ type testEnv struct {
 
 	mu    sync.Mutex
 	auths []string // Authorization header of each request
+	paths []string // method and path of each request
+
+	// handler, when set, answers instead of the 500 stub.
+	handler http.HandlerFunc
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -34,8 +38,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	e.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
 		e.auths = append(e.auths, r.Header.Get("Authorization"))
+		e.paths = append(e.paths, r.Method+" "+r.URL.Path)
+		h := e.handler
 		e.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if h != nil {
+			h(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, `{"error":{"code":"stub","message":"stub API"}}`)
 	}))
@@ -479,5 +489,247 @@ func TestHumanBytes(t *testing.T) {
 		if got := humanBytes(n); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestValidateLocal(t *testing.T) {
+	e := newTestEnv(t) // no key: validate without --bin needs none
+	r := e.mustRun("validate", e.writeFile("ok.json", `{"a": [1, 2.5, "x"]}`))
+	contains(t, "valid", r.stdout, "ok.json is valid JSON")
+
+	cases := []struct{ name, content, want string }{
+		{"comma.json", "{\n  \"a\": 1,\n}\n", "comma.json:3:1: invalid JSON"},
+		{"two.json", `{"a": 1} {"b": 2}`, "two.json:1:10: invalid JSON"},
+		{"nan.json", `{"a": NaN}`, "nan.json:1:7: invalid JSON"},
+		{"empty.json", " \n", "is empty"},
+	}
+	for _, c := range cases {
+		r := e.run([]string{"validate", e.writeFile(c.name, c.content)})
+		if r.code != ExitError {
+			t.Errorf("%s: exit %d", c.name, r.code)
+		}
+		contains(t, c.name, r.stderr, c.want)
+	}
+	r = e.run([]string{"validate", "/does/not/exist.json"})
+	contains(t, "missing file", r.stderr, "read /does/not/exist.json")
+	r = e.run([]string{"validate", "-"}, func(a *App) { a.Stdin = strings.NewReader(`[true]`) })
+	contains(t, "stdin", r.stdout, "<stdin> is valid JSON")
+	r = e.run([]string{"validate"})
+	if r.code != ExitUsage {
+		t.Errorf("no file: exit %d", r.code)
+	}
+	contains(t, "no file", r.stderr, "missing <file.json>")
+	if n := len(e.auths); n != 0 {
+		t.Errorf("validate without --bin made %d API requests", n)
+	}
+	r = e.mustRun("validate", "--help")
+	contains(t, "validate --help", r.stdout, "Usage: hotcfg validate <file.json> [flags]", "--bin string", "--no-annotations")
+	contains(t, "help", e.mustRun("help").stdout, "validate")
+}
+
+// settingsHandler serves GET .../settings with schema (nil: no schema),
+// and records nothing else: validate must not write.
+func settingsHandler(t *testing.T, schema string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/settings") {
+			t.Errorf("validate sent %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if schema == "" {
+			io.WriteString(w, `{"id":"flags","has_schema":false}`)
+			return
+		}
+		io.WriteString(w, `{"id":"flags","has_schema":true,"schema":`+schema+`}`)
+	}
+}
+
+func TestValidateSchema(t *testing.T) {
+	e := newTestEnv(t)
+	e.env["HOTCFG_API_KEY"] = "sk_live_test"
+	e.handler = settingsHandler(t, `{
+		"type": "object",
+		"required": ["max_items"],
+		"additionalProperties": false,
+		"properties": {
+			"max_items": {"type": "integer", "maximum": 12345678901234567890},
+			"theme": {"$ref": "#/$defs/theme"}
+		},
+		"$defs": {"theme": {"enum": ["light", "dark"]}}
+	}`)
+
+	r := e.mustRun("validate", e.writeFile("ok.json", `{"max_items": 12345678901234567890, "theme": "dark"}`), "--bin", "acme/flags")
+	contains(t, "valid", r.stdout, "ok.json matches the schema of acme/flags")
+	if got := e.paths[len(e.paths)-1]; got != "GET /v1/acme/flags/settings" {
+		t.Errorf("request = %s", got)
+	}
+	if got := e.auths[len(e.auths)-1]; got != "Bearer sk_live_test" {
+		t.Errorf("authorization = %q", got)
+	}
+
+	cases := []struct {
+		name, content string
+		wants         []string
+	}{
+		{"type.json", "{\n  \"max_items\": \"ten\"\n}", []string{
+			"type.json does not match the schema of bin acme/flags (1 error)",
+			"type.json:2  /max_items", "rule:    /properties/max_items/type", "message: must be an integer, not a string"}},
+		{"required.json", `{}`, []string{"(document root)", "rule:    /required", `is missing the required property "max_items"`}},
+		{"extra.json", `{"max_items": 1, "colour": "red"}`, []string{"/additionalProperties", `has property "colour", which the schema doesn't allow`}},
+		{"ref.json", `{"max_items": 1, "theme": "blue"}`, []string{"/theme", "/properties/theme/$ref/enum"}},
+		// One above the maximum: equal to it once rounded through float64.
+		{"big.json", `{"max_items": 12345678901234567891}`, []string{"/max_items", "/properties/max_items/maximum"}},
+		{"many.json", "{\n  \"max_items\": \"x\",\n  \"theme\": 3\n}", []string{"(2 errors)", "many.json:2  /max_items", "many.json:3  /theme"}},
+	}
+	for _, c := range cases {
+		r := e.run([]string{"validate", e.writeFile(c.name, c.content), "--bin", "acme/flags"})
+		if r.code != ExitError {
+			t.Errorf("%s: exit %d, stdout %s", c.name, r.code, r.stdout)
+		}
+		contains(t, c.name, r.stderr, c.wants...)
+	}
+
+	// A syntax error is reported before the schema is fetched.
+	n := len(e.paths)
+	r = e.run([]string{"validate", e.writeFile("bad.json", `{`), "--bin", "acme/flags"})
+	contains(t, "syntax first", r.stderr, "invalid JSON")
+	if len(e.paths) != n {
+		t.Error("fetched the schema for a file that is not JSON")
+	}
+
+	// No schema: the file only has to be JSON.
+	e.handler = settingsHandler(t, "")
+	r = e.mustRun("validate", e.writeFile("any.json", `[1]`), "--bin", "flags")
+	contains(t, "no schema", r.stdout, "any.json is valid JSON (flags has no schema)")
+
+	// References outside the schema are not fetched.
+	e.handler = settingsHandler(t, `{"$ref": "https://example.com/schema.json"}`)
+	r = e.run([]string{"validate", e.writeFile("x.json", `{}`), "--bin", "flags"})
+	if r.code != ExitError {
+		t.Errorf("remote $ref: exit %d", r.code)
+	}
+	contains(t, "remote $ref", r.stderr, `refers to "https://example.com/schema.json", outside the schema`)
+
+	// A key is needed with --bin, and the API's refusal is explained.
+	delete(e.env, "HOTCFG_API_KEY")
+	r = e.run([]string{"validate", e.writeFile("y.json", `{}`), "--bin", "flags"})
+	contains(t, "no key", r.stderr, "no API key")
+	e.env["HOTCFG_API_KEY"] = "pk_live_test"
+	e.handler = func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"code":"forbidden","message":"forbidden"}}`)
+	}
+	r = e.run([]string{"validate", e.writeFile("z.json", `{}`), "--bin", "flags"})
+	contains(t, "publishable key", r.stderr, "needs a secret key")
+}
+
+func TestWriteCommandsJSON(t *testing.T) {
+	e := newTestEnv(t)
+	e.env["HOTCFG_API_KEY"] = "sk_live_test"
+	body := `{"bin_id":"flags","environment":"staging","version":7,"hash":"abc","promoted_from":"development","promoted_from_version":3}`
+	e.handler = func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }
+	f := e.writeFile("ok.json", `{}`)
+	for _, args := range [][]string{
+		{"push", f, "--bin", "flags", "--env", "staging", "--json"},
+		{"promote", "flags", "--from", "development", "--to", "staging", "--json"},
+		{"rollback", "flags", "--env", "staging", "--to", "2", "--json"},
+	} {
+		r := e.mustRun(args...)
+		if r.stdout != body+"\n" {
+			t.Errorf("%s --json: stdout %q", args[0], r.stdout)
+		}
+	}
+	// Without --json the human output is unchanged.
+	r := e.mustRun("push", f, "--bin", "flags", "--env", "staging")
+	contains(t, "push", r.stdout, "✓ Pushed", "version  v7", "hash     abc")
+	r = e.mustRun("promote", "flags", "--from", "development", "--to", "staging")
+	contains(t, "promote", r.stdout, "Promoted flags development v3 → staging v7")
+}
+
+func TestGitHubAnnotations(t *testing.T) {
+	e := newTestEnv(t)
+	e.env["HOTCFG_API_KEY"] = "sk_live_test"
+	e.handler = settingsHandler(t, `{"properties": {"n": {"type": "integer"}}}`)
+	bad := e.writeFile("bad.json", "{\n  \"n\": \"x\"\n}")
+	broken := e.writeFile("broken.json", "{\n  \"n\": tru\n}")
+
+	annotations := func(stderr string) []string {
+		var out []string
+		for _, l := range strings.Split(stderr, "\n") {
+			if strings.HasPrefix(l, "::") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+
+	// Off unless GITHUB_ACTIONS=true.
+	if got := annotations(e.run([]string{"validate", bad, "--bin", "flags"}).stderr); len(got) != 0 {
+		t.Errorf("annotations outside GitHub Actions: %q", got)
+	}
+
+	e.env["GITHUB_ACTIONS"] = "true"
+	cases := []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"validate", bad, "--bin", "flags"},
+			[]string{"::error file=" + escapeProperty(bad) + ",line=2::/n must be an integer, not a string"}},
+		{[]string{"validate", broken},
+			[]string{"::error file=" + escapeProperty(broken) + ",line=2,col=11::invalid JSON: invalid character "}},
+		{[]string{"push", bad},
+			[]string{"::error::hotcfg push: --bin is required"}},
+		{[]string{"validate", "/does/not/exist.json"},
+			[]string{"::error::read /does/not/exist.json: "}},
+	}
+	for _, c := range cases {
+		got := annotations(e.run(c.args).stderr)
+		if len(got) != len(c.want) {
+			t.Errorf("%v: annotations %q, want %q", c.args, got, c.want)
+			continue
+		}
+		for i := range got {
+			if !strings.HasPrefix(got[i], c.want[i]) {
+				t.Errorf("%v: annotation %q, want prefix %q", c.args, got[i], c.want[i])
+			}
+		}
+	}
+
+	// --no-annotations turns them off; the human output stays.
+	r := e.run([]string{"validate", bad, "--bin", "flags", "--no-annotations"})
+	if got := annotations(r.stderr); len(got) != 0 {
+		t.Errorf("--no-annotations: %q", got)
+	}
+	contains(t, "--no-annotations", r.stderr, "does not match the schema")
+
+	// Text from the file can't start a line of its own: a key containing
+	// a newline and a fake command, quoted in the error message, stays on
+	// one line, escaped.
+	e.handler = settingsHandler(t, `{"additionalProperties": false}`)
+	evil := e.writeFile("evil.json", `{"a\n::warning::pwned": "x"}`)
+	r = e.run([]string{"validate", evil, "--bin", "flags"})
+	for _, l := range strings.Split(r.stderr, "\n") {
+		if strings.HasPrefix(l, "::warning") {
+			t.Errorf("injected workflow command: %q\n%s", l, r.stderr)
+		}
+	}
+	contains(t, "escaped key", r.stderr, `message: has property "a\n::warning::pwned", which the schema doesn't allow`)
+	if got := annotations(r.stderr); len(got) != 1 || !strings.HasPrefix(got[0], "::error ") {
+		t.Errorf("annotations %q, want one ::error", got)
+	}
+}
+
+func TestEscapeWorkflowCommands(t *testing.T) {
+	if got := escapeData("50% done\r\nnext"); got != "50%25 done%0D%0Anext" {
+		t.Errorf("escapeData = %q", got)
+	}
+	if got := escapeProperty("a,b:c%\n"); got != "a%2Cb%3Ac%25%0A" {
+		t.Errorf("escapeProperty = %q", got)
+	}
+	if got := oneLine("a\nb\x1b[31mc\td"); got != `a\nb\x1b[31mc\td` {
+		t.Errorf("oneLine = %q", got)
+	}
+	if got := oneLine("plain → text"); got != "plain → text" {
+		t.Errorf("oneLine changed plain text: %q", got)
 	}
 }

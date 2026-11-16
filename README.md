@@ -1,4 +1,27 @@
-# hotcfg CLI
+<p align="center">
+  <a href="https://hotcfg.run">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/hotcfg-logo-dark.svg">
+      <img src=".github/hotcfg-logo-light.svg" alt="hotcfg.run" width="280">
+    </picture>
+  </a>
+</p>
+
+<h1 align="center">hotcfg CLI</h1>
+
+<p align="center">
+  Remote JSON config for your apps, from the command line and CI.<br>
+  Push, check, diff, promote and roll back <a href="https://hotcfg.run">hotcfg.run</a> config.
+</p>
+
+<p align="center">
+  <a href="https://github.com/hotcfg/cli/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hotcfg/cli?color=FF4F12"></a>
+  <a href="https://github.com/hotcfg/cli/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/hotcfg/cli/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <a href="https://hotcfg.run/docs/cli"><img alt="Docs" src="https://img.shields.io/badge/docs-hotcfg.run-18181B"></a>
+</p>
+
+---
 
 The command-line tool for [hotcfg.run](https://hotcfg.run): remote JSON
 configuration for apps, served from the edge. Push config from CI, read it back,
@@ -13,13 +36,17 @@ go install github.com/hotcfg/cli/cmd/hotcfg@latest    # with Go 1.27+
 
 Or download a binary for Linux, macOS or Windows (amd64, arm64) from the
 [releases page](https://github.com/hotcfg/cli/releases) and check it against
-`checksums.txt`. It is a single static binary built with only the Go standard
-library.
+`checksums.txt`. It is a single static binary, built with the Go standard
+library plus the [jsonschema](https://github.com/santhosh-tekuri/jsonschema)
+validator that `hotcfg validate --bin` uses to check files locally (and
+[golang.org/x/text](https://pkg.go.dev/golang.org/x/text), which it uses for its
+messages).
 
 ## Usage
 
 ```sh
 hotcfg login                                   # saves a secret key
+hotcfg validate flags.json --bin mobile-flags  # check against the bin's schema, change nothing
 hotcfg push flags.json --bin mobile-flags --env staging
 hotcfg get mobile-flags --env staging --query '.features'
 hotcfg get acme/mobile-flags                   # without a key: name the organization
@@ -32,6 +59,7 @@ hotcfg rollback mobile-flags --env production --to 3
 | --- | --- |
 | `login` | Validate a secret API key and save it locally |
 | `push` | Upload a JSON file as the next version of a bin |
+| `validate` | Check a JSON file, and with `--bin` against the bin's schema, without pushing |
 | `get` | Print a bin's payload |
 | `diff` | Show a colored diff between two versions |
 | `rollback` | Make an earlier version current again |
@@ -61,6 +89,22 @@ to turn off colored output.
 
 Exit codes: `0` success, `1` the command failed (API error, invalid file, ...),
 `2` bad command line.
+
+### CI
+
+`hotcfg validate flags.json` checks that the file is valid JSON, offline and
+without a key. With `--bin`, it also downloads the bin's JSON Schema (2020-12)
+and checks the file against it locally; this needs a secret key with access to
+the bin. `push` is still the final check.
+
+`push`, `promote` and `rollback` accept `--json` to print the API's response
+(new version, hash, ...) instead of the summary.
+
+On GitHub Actions (`GITHUB_ACTIONS=true`), errors are also printed as
+[workflow commands](https://docs.github.com/actions/reference/workflow-commands-for-github-actions),
+so schema and syntax errors show on the line of the file in the pull request.
+Pass `--no-annotations` to turn this off. For a ready-made workflow step, see the
+[hotcfg GitHub Action](https://github.com/hotcfg/action).
 
 ## Development
 
