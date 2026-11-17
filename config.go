@@ -102,6 +102,10 @@ type target struct {
 	APIURL    string
 	Key       string
 	KeySource string // "--key", "HOTCFG_API_KEY", the credentials path, or ""
+	// PrivateURL is where bin reads with a publishable key go: the API's
+	// private host (privateAPIURL). Empty when it isn't known; such reads
+	// then go to APIURL, and follow its 421 if it names one.
+	PrivateURL string
 }
 
 // resolve applies the precedence rules:
@@ -144,7 +148,22 @@ func (a *App) resolve(c *commonFlags) (target, error) {
 		return target{}, err
 	}
 	t.APIURL = u
+	if t.PrivateURL, err = a.privateAPIURL(t.APIURL); err != nil {
+		return target{}, err
+	}
 	return t, nil
+}
+
+// privateAPIURL is where publishable keys read bins: $HOTCFG_PRIVATE_API_URL,
+// else DefaultPrivateAPIURL for the default API, else "" (unknown).
+func (a *App) privateAPIURL(apiURL string) (string, error) {
+	if v := strings.TrimSpace(a.Getenv("HOTCFG_PRIVATE_API_URL")); v != "" {
+		return normalizeAPIURL(v)
+	}
+	if apiURL == DefaultAPIURL {
+		return DefaultPrivateAPIURL, nil
+	}
+	return "", nil
 }
 
 // normalizeAPIURL checks an API base URL and strips a trailing slash or

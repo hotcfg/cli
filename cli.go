@@ -24,6 +24,11 @@ import (
 // credentials file names an API.
 const DefaultAPIURL = "https://api.hotcfg.run"
 
+// DefaultPrivateAPIURL is where publishable keys read bins when the API is
+// DefaultAPIURL: the private edge, which serves private bins from
+// Cloudflare. api.hotcfg.run refuses those reads (421 use_private_api_host).
+const DefaultPrivateAPIURL = "https://private-api.hotcfg.run"
+
 // Exit codes.
 const (
 	ExitOK    = 0

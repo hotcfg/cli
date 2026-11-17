@@ -65,6 +65,8 @@ func (e *apiError) Error() string {
 	}
 	s += ")"
 	switch {
+	case e.Code == "use_private_api_host":
+		s += "\nhint: publishable keys read private bins on the API's private host; for an API other than " + DefaultAPIURL + ", set HOTCFG_PRIVATE_API_URL to it"
 	case e.Code == "key_expired":
 		s += "\nhint: create a new key in the dashboard, then run 'hotcfg login'"
 	case e.Code == "private_bins_require_pro":
@@ -88,7 +90,62 @@ func (e *apiError) Error() string {
 // do sends a request to path (relative to /v1) and returns the body of a
 // 2xx response, or an *apiError.
 func (c *client) do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, http.Header, error) {
-	resp, err := c.send(ctx, method, path, query, body)
+	if method == http.MethodGet && isPublishableKey(c.t.Key) && isBareBinPath(path) {
+		// /v1/bins/<id> means "in the key's organization", which only the
+		// main API can resolve, and it refuses publishable-key reads of
+		// private bins (421). The private host needs the organization.
+		return nil, nil, errors.New("with a publishable key, name the bin as org/bin (e.g. acme/flags)")
+	}
+	// Bin reads with a publishable key go straight to the private host
+	// (DefaultPrivateAPIURL, or $HOTCFG_PRIVATE_API_URL). If it can't be
+	// reached (not set up yet, or down), the read goes to the API below.
+	// The CLI never sends a key to a host the API names.
+	if method == http.MethodGet && c.t.PrivateURL != "" && isPublishableKey(c.t.Key) && isOrgBinPath(path) {
+		u := c.t.PrivateURL + "/v1" + path
+		if len(query) > 0 {
+			u += "?" + query.Encode()
+		}
+		b, h, err := c.doURL(ctx, method, u, nil)
+		var ae *apiError
+		if err == nil || errors.As(err, &ae) {
+			return b, h, err
+		}
+	}
+	return c.doURL(ctx, method, c.url(path, query), body)
+}
+
+// isOrgBinPath reports whether path (relative to /v1) reads a bin by
+// organization: /<org>/<bin>, the only form the private host serves.
+func isOrgBinPath(path string) bool {
+	org, bin, ok := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+	if !ok || org == "" || bin == "" || strings.Contains(bin, "/") {
+		return false
+	}
+	switch org {
+	case "auth", "bins", "organizations", "invites", "webhooks", "plans", "status":
+		return false
+	}
+	return true
+}
+
+// isBareBinPath reports whether path (relative to /v1) reads a bin by id
+// alone: /bins/<id>.
+func isBareBinPath(path string) bool {
+	id, ok := strings.CutPrefix(path, "/bins/")
+	return ok && id != "" && !strings.Contains(id, "/")
+}
+
+func (c *client) url(path string, query url.Values) string {
+	u := c.t.APIURL + "/v1" + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	return u
+}
+
+// doURL is do for a full URL.
+func (c *client) doURL(ctx context.Context, method, u string, body []byte) ([]byte, http.Header, error) {
+	resp, err := c.sendURL(ctx, method, u, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,10 +180,11 @@ func (c *client) stream(ctx context.Context, path string, query url.Values) (io.
 
 // send builds and sends one API request.
 func (c *client) send(ctx context.Context, method, path string, query url.Values, body []byte) (*http.Response, error) {
-	u := c.t.APIURL + "/v1" + path
-	if len(query) > 0 {
-		u += "?" + query.Encode()
-	}
+	return c.sendURL(ctx, method, c.url(path, query), body)
+}
+
+// sendURL sends one request to a full URL.
+func (c *client) sendURL(ctx context.Context, method, u string, body []byte) (*http.Response, error) {
 	var rb io.Reader
 	if body != nil {
 		rb = bytes.NewReader(body)

@@ -88,7 +88,10 @@ Each setting is taken from the first place that has it:
    The file is written with mode `0600`.
 
 In CI, set `HOTCFG_API_KEY` from your secret store. Commands that write need a
-secret key (`sk_live_…`). Publishable keys (`pk_…`) are read-only. Set `NO_COLOR`
+secret key (`sk_live_…`). Publishable keys (`pk_…`) are read-only: `get` and
+`diff` with one read from `https://private-api.hotcfg.run`, where private bins
+are served for apps, and need the bin as `org/bin` (e.g. `acme/flags`). Against
+another API, set `HOTCFG_PRIVATE_API_URL` to its private host. Set `NO_COLOR`
 to turn off colored output.
 
 Exit codes: `0` success, `1` the command failed (API error, invalid file, ...),
