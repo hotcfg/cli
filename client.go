@@ -203,6 +203,16 @@ type writeResult struct {
 	RolledBackTo        int    `json:"rolled_back_to"`
 	PromotedFrom        string `json:"promoted_from"`
 	PromotedFromVersion int    `json:"promoted_from_version"`
+	// Rollout is set when a promote started a progressive rollout: Version
+	// is then the candidate.
+	Rollout *rollout `json:"rollout"`
+}
+
+// rollout is a running progressive rollout.
+type rollout struct {
+	Version        int `json:"version"`
+	Percent        int `json:"percent"`
+	CurrentVersion int `json:"current_version"`
 }
 
 // binPath is the API path of a bin: "acme/flags" names it by organization

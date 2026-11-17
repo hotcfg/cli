@@ -476,7 +476,7 @@ func isGroup(name string) bool { return len(groupCommands(name)) > 0 }
 func (a *App) groupUsage(w io.Writer, group string) {
 	fmt.Fprintf(w, "Usage: hotcfg %s <command> [arguments] [flags]\n\nCommands:\n", group)
 	for _, c := range groupCommands(group) {
-		fmt.Fprintf(w, "  %-12s %s\n", c.name, c.summary)
+		fmt.Fprintf(w, "  %-14s %s\n", c.name, c.summary)
 	}
 	fmt.Fprintf(w, "\nRun 'hotcfg %s <command> --help' for a command's flags.\n", group)
 }

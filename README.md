@@ -45,11 +45,14 @@ messages).
 hotcfg login                                   # saves a secret key
 hotcfg validate flags.json --bin mobile-flags  # check against the bin's schema, change nothing
 hotcfg types --bin mobile-flags --lang swift -o MobileFlags.swift  # types from the schema
+hotcfg schema infer flags.json -o schema.json                    # a schema to start from
 hotcfg push flags.json --bin mobile-flags --env staging
 hotcfg get mobile-flags --env staging --query '.features'
 hotcfg get acme/mobile-flags                   # without a key: name the organization
 hotcfg diff mobile-flags --from v3 --to latest
 hotcfg promote mobile-flags --from staging --to production
+hotcfg promote mobile-flags --from staging --to production --percent 10  # roll out to 10% first
+hotcfg rollout mobile-flags --percent 50                                 # then more, then --complete
 hotcfg rollback mobile-flags --env production --to 3
 ```
 
@@ -61,7 +64,8 @@ hotcfg rollback mobile-flags --env production --to 3
 | `get` | Print a bin's payload |
 | `diff` | Show a colored diff between two versions |
 | `rollback` | Make an earlier version current again |
-| `promote` | Copy the latest version of one environment to another |
+| `promote` | Copy the latest version of one environment to another, to everyone or with `--percent` to some readers first |
+| `rollout` | Change the share of a progressive rollout, complete it or abort it |
 | `history` | List a bin's versions in one environment |
 | `unpublish` | Stop serving an environment, keeping its history |
 | `bins list` / `bins create` | List or create your organization's bins |
@@ -69,6 +73,7 @@ hotcfg rollback mobile-flags --env production --to 3
 | `usage` | Show your organization's plan, usage and limits |
 | `export` | Download every bin and its history as one JSON file |
 | `types` | Generate typed code (TypeScript, Swift, Kotlin, Java, Python, PHP, Ruby, Go, GDScript) for a bin's config from its JSON Schema |
+| `schema infer` | Write a JSON Schema that accepts the given JSON files, to start a bin's schema from (no key needed) |
 
 Run `hotcfg help` or `hotcfg <command> --help` for flags.
 

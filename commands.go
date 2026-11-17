@@ -524,6 +524,7 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	fs, common := a.newFlagSet("promote")
 	fromFlag := fs.String("from", "", "source environment, e.g. staging (required)")
 	toFlag := fs.String("to", "", "target environment, e.g. production (required)")
+	percent := fs.Int("percent", 0, "roll out gradually: give the copy to this percent (1-99) of the target's readers, and keep the rest on its current version")
 	asJSON := fs.Bool("json", false, "print the API's JSON response")
 	pos, err := exactArgs(fs, args, "<bin_id>")
 	if err != nil {
@@ -531,6 +532,9 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	}
 	if *fromFlag == "" || *toFlag == "" {
 		return usagef("--from and --to are required")
+	}
+	if *percent < 0 || *percent > 99 {
+		return usagef("--percent must be from 1 to 99 (leave it out to promote to everyone)")
 	}
 	from, err := parseEnvFlag("from", *fromFlag)
 	if err != nil {
@@ -550,7 +554,11 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	if err := t.requireKey(); err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"from_env": from, "to_env": to})
+	req := map[string]any{"from_env": from, "to_env": to}
+	if *percent > 0 {
+		req["percent"] = *percent
+	}
+	body, _ := json.Marshal(req)
 	b, _, err := a.client(t).do(ctx, http.MethodPost, binPath(pos[0], "/promote"), nil, body)
 	if err != nil {
 		var ae *apiError
@@ -568,9 +576,90 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 		return fmt.Errorf("unexpected response: %w", err)
 	}
 	p := a.printer()
+	if ro := res.Rollout; ro != nil {
+		p.ok("Rolling out %s %s v%d → %s v%d to %d%%", res.BinID, from, res.PromotedFromVersion, res.Environment, res.Version, ro.Percent)
+		p.field("others", fmt.Sprintf("v%d, and apps that send no ?bucket=", ro.CurrentVersion))
+		p.field("next", fmt.Sprintf("hotcfg rollout %s --env %s --percent 50, --complete or --abort", pos[0], res.Environment))
+		return nil
+	}
 	p.ok("Promoted %s %s v%d → %s v%d", res.BinID, from, res.PromotedFromVersion, res.Environment, res.Version)
 	p.field("hash", res.Hash)
 	p.field("cache", fmt.Sprintf("edge purge queued for %s", res.Environment))
+	return nil
+}
+
+// runRollout changes, completes or aborts a progressive rollout that
+// promote --percent started.
+func runRollout(ctx context.Context, a *App, args []string) error {
+	fs, common := a.newFlagSet("rollout")
+	envFlag := fs.String("env", "production", "environment: production, staging or development")
+	percent := fs.Int("percent", 0, "give the candidate to this percent (1-99) of readers")
+	complete := fs.Bool("complete", false, "give the candidate to everyone: it becomes the current version")
+	abort := fs.Bool("abort", false, "stop the rollout: everyone gets the current version again")
+	asJSON := fs.Bool("json", false, "print the API's JSON response")
+	pos, err := exactArgs(fs, args, "<bin_id>")
+	if err != nil {
+		return err
+	}
+	n := 0
+	for _, set := range []bool{*percent != 0, *complete, *abort} {
+		if set {
+			n++
+		}
+	}
+	if n != 1 {
+		return usagef("give exactly one of --percent, --complete or --abort")
+	}
+	if *percent < 0 || *percent > 99 {
+		return usagef("--percent must be from 1 to 99; to give the candidate to everyone, use --complete")
+	}
+	env, err := parseEnvFlag("env", *envFlag)
+	if err != nil {
+		return err
+	}
+	t, err := a.resolve(common)
+	if err != nil {
+		return err
+	}
+	if err := t.requireKey(); err != nil {
+		return err
+	}
+	path, req := "/rollout", map[string]any{"env": env}
+	switch {
+	case *complete:
+		path = "/rollout/complete"
+	case *abort:
+		path = "/rollout/abort"
+	default:
+		req["percent"] = *percent
+	}
+	body, _ := json.Marshal(req)
+	b, _, err := a.client(t).do(ctx, http.MethodPost, binPath(pos[0], path), nil, body)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return a.writeJSONOut(b)
+	}
+	var res struct {
+		Version         int      `json:"version"`
+		PreviousVersion int      `json:"previous_version"`
+		AbortedVersion  int      `json:"aborted_version"`
+		Rollout         *rollout `json:"rollout"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return fmt.Errorf("unexpected response: %w", err)
+	}
+	p := a.printer()
+	switch {
+	case *complete:
+		p.ok("Rollout completed: %s %s is now v%d for everyone (was v%d)", pos[0], env, res.Version, res.PreviousVersion)
+	case *abort:
+		p.ok("Rollout aborted: %s %s serves v%d to everyone again; v%d stays in history", pos[0], env, res.Version, res.AbortedVersion)
+	case res.Rollout != nil:
+		p.ok("Rolling out %s %s v%d to %d%%; the rest get v%d", pos[0], env, res.Rollout.Version, res.Rollout.Percent, res.Rollout.CurrentVersion)
+	}
+	p.field("cache", fmt.Sprintf("edge purge queued for %s", env))
 	return nil
 }
 

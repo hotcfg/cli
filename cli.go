@@ -109,7 +109,8 @@ func init() {
 		{"get", "<bin_id>", "Print a bin's payload", runGet},
 		{"diff", "<bin_id>", "Show a colored diff between two versions", runDiff},
 		{"rollback", "<bin_id>", "Make an earlier version current again", runRollback},
-		{"promote", "<bin_id>", "Copy the latest version of one environment to another", runPromote},
+		{"promote", "<bin_id>", "Copy the latest version of one environment to another, to everyone or with --percent to some", runPromote},
+		{"rollout", "<bin_id>", "Change, complete or abort a progressive rollout started by promote --percent", runRollout},
 		{"history", "<bin_id>", "List a bin's versions in one environment", runHistory},
 		{"unpublish", "<bin_id>", "Stop serving an environment, keeping its history", runUnpublish},
 		{"bins list", "", "List your organization's bins", runBinsList},
@@ -118,6 +119,7 @@ func init() {
 		{"usage", "", "Show your organization's plan, usage and limits", runUsage},
 		{"export", "", "Download every bin and its history as one JSON file", runExport},
 		{"types", "", "Generate typed code for a bin's config from its JSON Schema", runTypes},
+		{"schema infer", "<file.json>...", "Write a JSON Schema that accepts the given JSON files, to start a bin's schema from", runSchemaInfer},
 	}
 }
 
