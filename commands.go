@@ -525,6 +525,8 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	fromFlag := fs.String("from", "", "source environment, e.g. staging (required)")
 	toFlag := fs.String("to", "", "target environment, e.g. production (required)")
 	percent := fs.Int("percent", 0, "roll out gradually: give the copy to this percent (1-99) of the target's readers, and keep the rest on its current version")
+	atFlag := fs.String("at", "", "schedule the promote for this time instead (RFC 3339, e.g. 2026-11-21T18:00:00Z, or now); the source's current version is what ships")
+	revertFlag := fs.String("revert-at", "", "with --at: roll the target back to what it served before at this time, unless it changed in between")
 	asJSON := fs.Bool("json", false, "print the API's JSON response")
 	pos, err := exactArgs(fs, args, "<bin_id>")
 	if err != nil {
@@ -532,6 +534,20 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	}
 	if *fromFlag == "" || *toFlag == "" {
 		return usagef("--from and --to are required")
+	}
+	if *revertFlag != "" && *atFlag == "" {
+		return usagef("--revert-at needs --at")
+	}
+	if *atFlag != "" && *percent != 0 {
+		return usagef("a progressive rollout can't be scheduled: leave out --percent, or --at")
+	}
+	at, err := scheduleTimeFlag("at", *atFlag)
+	if err != nil {
+		return err
+	}
+	revertAt, err := scheduleTimeFlag("revert-at", *revertFlag)
+	if err != nil {
+		return err
 	}
 	if *percent < 0 || *percent > 99 {
 		return usagef("--percent must be from 1 to 99 (leave it out to promote to everyone)")
@@ -558,6 +574,12 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	if *percent > 0 {
 		req["percent"] = *percent
 	}
+	if at != "" {
+		req["at"] = at
+	}
+	if revertAt != "" {
+		req["revert_at"] = revertAt
+	}
 	body, _ := json.Marshal(req)
 	b, _, err := a.client(t).do(ctx, http.MethodPost, binPath(pos[0], "/promote"), nil, body)
 	if err != nil {
@@ -570,6 +592,20 @@ func runPromote(ctx context.Context, a *App, args []string) error {
 	}
 	if *asJSON {
 		return a.writeJSONOut(b)
+	}
+	if at != "" {
+		var sc schedule
+		if err := json.Unmarshal(b, &sc); err != nil {
+			return fmt.Errorf("unexpected response: %w", err)
+		}
+		p := a.printer()
+		p.ok("Scheduled %s %s v%d → %s at %s", sc.BinID, sc.FromEnv, sc.FromVersion, sc.ToEnv, localTime(sc.At))
+		if sc.RevertAt != nil {
+			p.field("revert", fmt.Sprintf("%s back to what it serves just before the promote, at %s, unless it changes in between", sc.ToEnv, localTime(*sc.RevertAt)))
+		}
+		p.field("id", sc.ID)
+		p.field("cancel", fmt.Sprintf("hotcfg schedules cancel %s %s", pos[0], sc.ID))
+		return nil
 	}
 	var res writeResult
 	if err := json.Unmarshal(b, &res); err != nil {

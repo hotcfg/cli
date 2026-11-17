@@ -53,6 +53,9 @@ hotcfg diff mobile-flags --from v3 --to latest
 hotcfg promote mobile-flags --from staging --to production
 hotcfg promote mobile-flags --from staging --to production --percent 10  # roll out to 10% first
 hotcfg rollout mobile-flags --percent 50                                 # then more, then --complete
+hotcfg promote mobile-flags --from staging --to production \
+  --at 2026-11-21T18:00:00Z --revert-at 2026-11-24T06:00:00Z            # schedule it, and put it back later
+hotcfg schedules list mobile-flags
 hotcfg rollback mobile-flags --env production --to 3
 ```
 
@@ -64,7 +67,8 @@ hotcfg rollback mobile-flags --env production --to 3
 | `get` | Print a bin's payload |
 | `diff` | Show a colored diff between two versions |
 | `rollback` | Make an earlier version current again |
-| `promote` | Copy the latest version of one environment to another, to everyone or with `--percent` to some readers first |
+| `promote` | Copy the latest version of one environment to another, to everyone or with `--percent` to some readers first, or with `--at` at a set time |
+| `schedules list` / `schedules cancel` | List a bin's scheduled promotes, or cancel one |
 | `rollout` | Change the share of a progressive rollout, complete it or abort it |
 | `history` | List a bin's versions in one environment |
 | `unpublish` | Stop serving an environment, keeping its history |
@@ -72,7 +76,7 @@ hotcfg rollback mobile-flags --env production --to 3
 | `env delete` | Delete an environment of a bin with its whole history |
 | `usage` | Show your organization's plan, usage and limits |
 | `export` | Download every bin and its history as one JSON file |
-| `types` | Generate typed code (TypeScript, Swift, Kotlin, Java, Python, PHP, Ruby, Go, GDScript) for a bin's config from its JSON Schema |
+| `types` | Generate typed code (TypeScript, Swift, Kotlin, Java, C#, Python, PHP, Ruby, Go, GDScript) for a bin's config from its JSON Schema |
 | `schema infer` | Write a JSON Schema that accepts the given JSON files, to start a bin's schema from (no key needed) |
 
 Run `hotcfg help` or `hotcfg <command> --help` for flags.

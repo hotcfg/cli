@@ -27,7 +27,7 @@ func runTypes(ctx context.Context, a *App, args []string) error {
 	binID := fs.String("bin", "", "use this bin's JSON Schema: an id, or org-slug/id (needs a secret key)")
 	schemaFile := fs.String("schema", "", "use a JSON Schema file instead of a bin's (no key needed)")
 	name := fs.String("name", "", "name of the top-level type (default: from the bin id or the schema's title)")
-	pkg := fs.String("package", "", "package (Go, Kotlin, Java), namespace (PHP) or module (Ruby) for the types; Go defaults to config")
+	pkg := fs.String("package", "", "package (Go, Kotlin, Java), namespace (PHP, C#) or module (Ruby) for the types; Go defaults to config")
 	out := fs.String("o", "", "write the types to this file instead of stdout")
 	fs.StringVar(out, "out", "", "same as -o")
 	check := fs.Bool("check", false, "don't write: fail if the file named by -o differs from what would be generated")
@@ -1022,6 +1022,7 @@ func init() {
 		{id: "ruby", aliases: []string{"rb"}, label: "Ruby", emit: emitRuby},
 		{id: "go", label: "Go", emit: emitGo},
 		{id: "gdscript", aliases: []string{"gd", "godot"}, label: "GDScript", emit: emitGDScript},
+		{id: "csharp", aliases: []string{"cs", "c#", "unity"}, label: "C#", emit: emitCSharp},
 	}
 }
 
@@ -1127,8 +1128,24 @@ func (e *emitter) objectsLeavesFirst() []*tObject {
 }
 
 // docLines splits a description into lines, trimmed, without blank ends.
+// Every line break a language may read (\r, U+0085, U+2028 and U+2029 as
+// well as \n) splits a line, and other control characters become spaces:
+// a description goes into line comments, so text after a break the
+// generator didn't see would be code.
 func docLines(s string) []string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\v' || r == '\f' || r == 0x85 || r == 0x2028 || r == 0x2029:
+			return '\n'
+		case r == '\t':
+			return r
+		case r < 0x20 || r == 0x7f:
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}

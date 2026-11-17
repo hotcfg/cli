@@ -114,8 +114,10 @@ func init() {
 		{"get", "<bin_id>", "Print a bin's payload", runGet},
 		{"diff", "<bin_id>", "Show a colored diff between two versions", runDiff},
 		{"rollback", "<bin_id>", "Make an earlier version current again", runRollback},
-		{"promote", "<bin_id>", "Copy the latest version of one environment to another, to everyone or with --percent to some", runPromote},
+		{"promote", "<bin_id>", "Copy the latest version of one environment to another: now, to some readers first (--percent) or later (--at)", runPromote},
 		{"rollout", "<bin_id>", "Change, complete or abort a progressive rollout started by promote --percent", runRollout},
+		{"schedules list", "<bin_id>", "List a bin's scheduled promotes", runSchedulesList},
+		{"schedules cancel", "<bin_id> <schedule_id>", "Cancel a scheduled promote, or the revert of one that ran", runSchedulesCancel},
 		{"history", "<bin_id>", "List a bin's versions in one environment", runHistory},
 		{"unpublish", "<bin_id>", "Stop serving an environment, keeping its history", runUnpublish},
 		{"bins list", "", "List your organization's bins", runBinsList},
@@ -196,8 +198,12 @@ func (a *App) Run(ctx context.Context, args []string) int {
 
 func (a *App) usage(w io.Writer) {
 	fmt.Fprintf(w, "hotcfg manages hotcfg.run configuration bins.\n\nA <bin_id> is a bin's id (looked up in your key's organization) or org-slug/id.\n\nUsage:\n  hotcfg <command> [arguments] [flags]\n\nCommands:\n")
+	width := 0
 	for _, c := range commands {
-		fmt.Fprintf(w, "  %-12s %s\n", c.name, c.summary)
+		width = max(width, len(c.name))
+	}
+	for _, c := range commands {
+		fmt.Fprintf(w, "  %-*s %s\n", width, c.name, c.summary)
 	}
 	fmt.Fprintf(w, `
 Every command accepts:

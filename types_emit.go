@@ -35,7 +35,9 @@ func quoteC(s string, extra map[rune]string) string {
 		case '\t':
 			b.WriteString(`\t`)
 		default:
-			if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			// U+0085, U+2028 and U+2029 end a line in C#, so they can't
+			// appear in a string as they are.
+			if r < 0x20 || r == 0x7f || r == 0x85 || r == 0x2028 || r == 0x2029 || r == utf8.RuneError {
 				fmt.Fprintf(&b, `\u%04x`, r)
 			} else {
 				b.WriteRune(r)
@@ -577,10 +579,15 @@ func javadoc(e *emitter, indent string, lines []string) {
 	}
 	e.line("%s/**", indent)
 	for _, l := range lines {
-		e.line("%s", strings.TrimRight(indent+" * "+strings.ReplaceAll(l, "*/", `*\/`), " "))
+		e.line("%s", strings.TrimRight(indent+" * "+javadocEscape.Replace(l), " "))
 	}
 	e.line("%s */", indent)
 }
+
+// javadocEscape keeps a line inside its comment. Java reads \uXXXX escapes
+// everywhere, comments included, so "*/" would end it: a backslash
+// is written as an HTML entity, which javadoc shows as a backslash.
+var javadocEscape = strings.NewReplacer("*/", `*\/`, `\`, "&#92;")
 
 // javaType is a component's type: primitive when the value is always there.
 func javaType(e *emitter, t *tType, optional bool) string {
@@ -1429,4 +1436,174 @@ func gdExpr(t *tType, src string, depth int, root string, usesMap *bool) string 
 		return fmt.Sprintf("%s._map_values(%s, func(%s): return %s)", root, src, x, inner)
 	}
 	return fmt.Sprintf("%s.map(func(%s): return %s)", src, x, inner)
+}
+
+// ---- C# (Newtonsoft.Json, as Unity's package and .NET use it) ----
+
+// csMemberNames can't be property names: they'd hide object's members (or,
+// on the top-level type, its FromJson).
+var csMemberNames = setOf("Equals", "GetHashCode", "GetType", "ToString", "MemberwiseClone", "Finalize", "ReferenceEquals")
+
+// csRefs are the library types the file names, written short unless one of
+// the config's own types takes the name.
+type csRefs struct {
+	list, dict, jtoken, convert, prop, required, exc string
+}
+
+func newCSRefs(objects []*tObject) csRefs {
+	taken := map[string]bool{}
+	for _, o := range objects {
+		taken[o.name] = true
+	}
+	ref := func(short, full string) string {
+		if taken[short] {
+			return "global::" + full
+		}
+		return short
+	}
+	r := csRefs{
+		list:     ref("List", "System.Collections.Generic.List"),
+		dict:     ref("Dictionary", "System.Collections.Generic.Dictionary"),
+		jtoken:   ref("JToken", "Newtonsoft.Json.Linq.JToken"),
+		convert:  ref("JsonConvert", "Newtonsoft.Json.JsonConvert"),
+		prop:     ref("JsonProperty", "Newtonsoft.Json.JsonProperty"),
+		required: ref("Required", "Newtonsoft.Json.Required"),
+		exc:      ref("JsonSerializationException", "Newtonsoft.Json.JsonSerializationException"),
+	}
+	if taken["JsonPropertyAttribute"] {
+		r.prop = "global::Newtonsoft.Json.JsonProperty"
+	}
+	return r
+}
+
+func emitCSharp(e *emitter) string {
+	for _, h := range e.header() {
+		e.line("// %s", h)
+	}
+	e.line("// Needs Newtonsoft.Json: in Unity, the com.unity.nuget.newtonsoft-json package;")
+	e.line("// elsewhere, the Newtonsoft.Json NuGet package.")
+	e.line("")
+	e.line("#nullable enable")
+	e.line("")
+	e.line("using System.Collections.Generic;")
+	e.line("using Newtonsoft.Json;")
+	e.line("using Newtonsoft.Json.Linq;")
+	r := newCSRefs(e.objects())
+	in := ""
+	if e.opts.pkg != "" {
+		e.line("")
+		e.line("namespace %s", e.opts.pkg)
+		e.line("{")
+		in = "    "
+	}
+	for i, o := range e.objects() {
+		if i > 0 || e.opts.pkg == "" {
+			e.line("")
+		}
+		csDoc(e, in, docLines(o.doc))
+		e.line("%spublic sealed class %s", in, o.name)
+		e.line("%s{", in)
+		reserved := map[string]bool{o.name: true}
+		for k := range csMemberNames {
+			reserved[k] = true
+		}
+		root := o.name == e.opts.name
+		if root {
+			reserved["FromJson"] = true
+		}
+		n := fieldNamer{style: func(w []string) string { return pascalCase(w, false) }, reserved: reserved, escape: func(s string) string { return s + "Value" }}
+		for j, f := range o.fields {
+			if j > 0 {
+				e.line("")
+			}
+			csDoc(e, in+"    ", fieldDoc(f))
+			name := n.name(f.key)
+			t := csType(e, r, f.typ)
+			if f.optional() && !strings.HasSuffix(t, "?") {
+				t += "?"
+			}
+			switch {
+			case f.required && !f.typ.nullable:
+				e.line("%s    [%s(%s, Required = %s.Always)]", in, r.prop, quoteJS(f.key), r.required)
+			case f.required:
+				e.line("%s    [%s(%s, Required = %s.AllowNull)]", in, r.prop, quoteJS(f.key), r.required)
+			default:
+				e.line("%s    [%s(%s)]", in, r.prop, quoteJS(f.key))
+			}
+			init := ""
+			if !strings.HasSuffix(t, "?") && !csValueType(f.typ) {
+				// Required.Always means Newtonsoft fills it or throws.
+				init = " = null!;"
+			}
+			e.line("%s    public %s %s { get; set; }%s", in, t, name, init)
+		}
+		if root {
+			if len(o.fields) > 0 {
+				e.line("")
+			}
+			e.line("%s    /// <summary>Parses the config's JSON text. Throws a JsonException when it doesn't match the schema's types or misses a required field.</summary>", in)
+			e.line("%s    public static %s FromJson(string json) =>", in, o.name)
+			e.line("%s        %s.DeserializeObject<%s>(json) ?? throw new %s(\"the config is null\");", in, r.convert, o.name, r.exc)
+		}
+		e.line("%s}", in)
+	}
+	if e.opts.pkg != "" {
+		e.line("}")
+	}
+	return e.b.String()
+}
+
+// csDoc writes an XML doc comment.
+func csDoc(e *emitter, indent string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	if len(lines) == 1 {
+		e.line("%s/// <summary>%s</summary>", indent, esc.Replace(lines[0]))
+		return
+	}
+	e.line("%s/// <summary>", indent)
+	for _, l := range lines {
+		e.line("%s", strings.TrimRight(indent+"/// "+esc.Replace(l), " "))
+	}
+	e.line("%s/// </summary>", indent)
+}
+
+// csValueType reports whether t is a C# value type (needs ? to be null).
+func csValueType(t *tType) bool {
+	switch t.kind {
+	case kInt, kNumber, kBool:
+		return true
+	}
+	return false
+}
+
+func csType(e *emitter, r csRefs, t *tType) string {
+	var s string
+	switch t.kind {
+	case kString:
+		s = "string"
+	case kInt:
+		s = "long"
+	case kNumber:
+		s = "double"
+	case kBool:
+		s = "bool"
+	case kArray:
+		s = r.list + "<" + csType(e, r, t.elem) + ">"
+	case kMap:
+		s = r.dict + "<string, " + csType(e, r, t.elem) + ">"
+	case kObject:
+		s = t.obj.name
+	case kUnion:
+		e.degrade(t, "C# has no type for one of several types; typed as JToken")
+		s = r.jtoken
+	default:
+		s = r.jtoken
+	}
+	if t.nullable {
+		s += "?"
+	}
+	return s
 }
