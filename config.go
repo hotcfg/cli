@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,12 @@ func (a *App) loadCredentials() (*Credentials, error) {
 		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
 			fmt.Fprintf(a.Stderr, "warning: %s is readable by other users; run: chmod 600 %s\n", path, path)
 		}
+	}
+	// An empty file (or one with only a newline, from an editor or a
+	// truncated write) holds no credentials: treat it as missing, so
+	// HOTCFG_API_KEY and 'hotcfg login' work without deleting it first.
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil
 	}
 	var c Credentials
 	if err := json.Unmarshal(b, &c); err != nil {
